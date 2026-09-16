@@ -361,6 +361,9 @@ final class TiledUIView<
 
   private let tiledLayout: TiledCollectionViewLayout = .init()
   private var collectionView: UICollectionView!
+  /// Overlay from the window top through the navigation bar. iOS 27 sizes the
+  /// top scroll-edge pocket from this container's bounds, not from style alone.
+  private var topEdgeChromeView: UIView?
 
   private var items: Deque<Item> = []
   private var displayedAccessoryState = DisplayedAccessoryState()
@@ -597,6 +600,78 @@ final class TiledUIView<
     if let style = isRTL ? edgeEffectStyles.leading : edgeEffectStyles.trailing {
       collectionView.rightEdgeEffect.style = style.uiKitStyle
     }
+    updateTopEdgeChrome()
+  }
+
+  private func enclosingNavigationBar() -> UINavigationBar? {
+    sequence(first: self as UIResponder, next: \.next)
+      .compactMap { $0 as? UIViewController }
+      .compactMap(\.navigationController)
+      .first?
+      .navigationBar
+  }
+
+  /// Prefer the navigation bar's bottom edge so the pocket includes the inline
+  /// title row, not only the display's top safe area.
+  private func topEdgeChromeFrame() -> CGRect {
+    guard let window else {
+      return CGRect(x: 0, y: 0, width: bounds.width, height: safeAreaInsets.top)
+    }
+    let windowTopInSelf = convert(CGPoint.zero, from: window)
+    let chromeBottomInSelf: CGFloat
+    if let navBar = enclosingNavigationBar(), navBar.window != nil {
+      chromeBottomInSelf = convert(CGPoint(x: 0, y: navBar.bounds.maxY), from: navBar).y
+    } else {
+      chromeBottomInSelf = convert(
+        CGPoint(x: 0, y: window.safeAreaInsets.top),
+        from: window
+      ).y
+    }
+    let height = max(0, chromeBottomInSelf - windowTopInSelf.y)
+    return CGRect(x: 0, y: windowTopInSelf.y, width: bounds.width, height: height)
+  }
+
+  @available(iOS 26.0, *)
+  private func updateTopEdgeChrome() {
+    guard edgeEffectStyles.top != nil, window != nil, collectionView != nil else {
+      uninstallTopEdgeChrome()
+      return
+    }
+
+    let chrome: UIView
+    if let existing = topEdgeChromeView {
+      chrome = existing
+    } else {
+      let view = UIView()
+      view.isUserInteractionEnabled = false
+      view.backgroundColor = .clear
+      addSubview(view)
+      topEdgeChromeView = view
+      chrome = view
+      let interaction = UIScrollEdgeElementContainerInteraction()
+      interaction.edge = .top
+      view.addInteraction(interaction)
+    }
+
+    chrome.interactions
+      .compactMap { $0 as? UIScrollEdgeElementContainerInteraction }
+      .first?
+      .scrollView = collectionView
+    chrome.frame = topEdgeChromeFrame()
+  }
+
+  @available(iOS 26.0, *)
+  private func uninstallTopEdgeChrome() {
+    if let chrome = topEdgeChromeView {
+      for interaction in chrome.interactions {
+        if let edge = interaction as? UIScrollEdgeElementContainerInteraction {
+          edge.scrollView = nil
+          chrome.removeInteraction(edge)
+        }
+      }
+      chrome.removeFromSuperview()
+    }
+    topEdgeChromeView = nil
   }
 
   /// Additional content inset for keyboard, headers, footers, etc.
@@ -804,6 +879,13 @@ final class TiledUIView<
   override func safeAreaInsetsDidChange() {
     super.safeAreaInsetsDidChange()
     applyContentInsets()
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if #available(iOS 26.0, *) {
+      updateTopEdgeChrome()
+    }
   }
 
   @objc private func handleTapBackground(_ gesture: UITapGestureRecognizer) {
@@ -1239,6 +1321,9 @@ final class TiledUIView<
   override func layoutSubviews() {
     super.layoutSubviews()
     updateHiddenEdgeContentInset()
+    if #available(iOS 26.0, *) {
+      updateTopEdgeChrome()
+    }
 
     // Re-pin the anchored target across bounds changes (e.g. rotation). The first
     // real bounds is the positioning pass itself, so skip re-pinning until a
